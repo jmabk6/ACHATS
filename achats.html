@@ -80,7 +80,7 @@ body { background:var(--bg); font-family:'Inter',sans-serif; max-width:430px; ma
 
 /* FORM */
 .flabel { font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:.5px; color:var(--muted); margin-bottom:3px; display:block; }
-.finput { width:100%; height:36px; padding:0 10px; border:1.5px solid var(--border); border-radius:10px; font-size:14px; font-family:'Inter',sans-serif; background:var(--surface); outline:none; color:var(--text); margin-bottom:8px; -webkit-appearance:none; appearance:none; display:block; }
+.finput { width:100%; padding:8px 10px; border:1.5px solid var(--border); border-radius:10px; font-size:14px; line-height:1.3; font-family:'Inter',sans-serif; background:var(--surface); outline:none; color:var(--text); margin-bottom:8px; -webkit-appearance:none; appearance:none; display:block; box-sizing:border-box; }
 .finput:focus { border-color:var(--accent); }
 
 /* TWO-COL */
@@ -361,7 +361,8 @@ body { background:var(--bg); font-family:'Inter',sans-serif; max-width:430px; ma
     <div class="breakdown">
       <div class="brow"><span class="blbl">HT</span><span class="bval" id="o-ht">&#x2014;</span></div>
       <div class="brow"><span class="blbl">TVA</span><span class="bval" id="o-tva">&#x2014;</span></div>
-      <div id="o-ttc" style="display:none"></div>
+      <div class="bdiv"></div>
+      <div class="brow brow-ttc"><span class="blbl">TTC</span><span class="bval" id="o-ttc">&#x2014;</span></div>
       <div class="bformula" id="formula"></div>
     </div>
 
