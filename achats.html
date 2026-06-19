@@ -237,6 +237,10 @@ body { background:var(--bg); font-family:'Inter',sans-serif; max-width:430px; ma
 
 /* PICKER FOOTER (Valider for multi-select) */
 .picker-footer { padding:12px 16px 28px; border-top:1px solid var(--border); background:var(--surface); flex-shrink:0; }
+
+/* SCANNER */
+@keyframes scanFlash { 0%{opacity:.9} 100%{opacity:0} }
+.scan-flash { position:absolute;inset:0;background:white;opacity:0;pointer-events:none; }
 </style>
 </head>
 <body>
@@ -602,6 +606,21 @@ body { background:var(--bg); font-family:'Inter',sans-serif; max-width:430px; ma
   <div class="picker-footer">
     <button class="btn-primary" id="cat-validate-btn" onclick="validateCatPicker()">Valider</button>
   </div>
+</div>
+
+<!-- ===== SCANNER OVERLAY ===== -->
+<div id="scanner-ov" style="display:none;position:fixed;inset:0;z-index:400;background:#000;">
+  <video id="scanner-v" autoplay playsinline muted style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;"></video>
+  <canvas id="scanner-proc" style="display:none;"></canvas>
+  <canvas id="scanner-cap"  style="display:none;"></canvas>
+  <canvas id="scanner-disp" style="position:absolute;inset:0;width:100%;height:100%;"></canvas>
+  <div class="scan-flash" id="scanner-flash"></div>
+  <div style="position:absolute;top:0;left:0;right:0;padding:48px 16px 14px;display:flex;justify-content:space-between;align-items:center;background:linear-gradient(rgba(0,0,0,.55),transparent);">
+    <button onclick="scannerClose()" style="background:rgba(255,255,255,.18);border:none;color:white;width:36px;height:36px;border-radius:50%;font-size:18px;cursor:pointer;line-height:1;">&#x2715;</button>
+    <span id="scanner-hint" style="color:white;font-size:13px;font-weight:600;text-shadow:0 1px 4px rgba(0,0,0,.6);">Visez la facture</span>
+    <button id="scanner-ok-btn" onclick="scannerValidate()" style="background:var(--accent);border:none;color:white;padding:8px 18px;border-radius:20px;font-size:14px;font-weight:700;cursor:pointer;">OK (0)</button>
+  </div>
+  <div id="scanner-strip" style="position:absolute;bottom:24px;left:0;right:0;display:flex;gap:8px;padding:0 16px;overflow-x:auto;"></div>
 </div>
 
 <script>
@@ -1152,7 +1171,7 @@ function renderFilterPills(containerId,items,selected,onSelect) {
 }
 
 // ===== SCAN / OCR =====
-function doScan()   { document.getElementById('input-scan').click(); }
+function doScan()   { scannerOpen(); }
 function doImport() { document.getElementById('input-import').click(); }
 async function handleImage(input) {
   var file=input.files[0]; if(!file) return; input.value='';
@@ -1317,6 +1336,216 @@ function emptyState(icon,txt) { return '<div class="empty"><div class="empty-ico
 // ===== LISTENERS =====
 document.getElementById('f-ttc').addEventListener('input', recompute);
 document.getElementById('f-tva').addEventListener('input', recompute);
+
+// ===== SCANNER =====
+var _scanPages=[], _scanTimer=null, _scanStream=null, _scanStable=0, _scanLastQuad=null;
+
+function scannerOpen() {
+  _scanPages=[]; _scanStable=0; _scanLastQuad=null;
+  document.getElementById('scanner-strip').innerHTML='';
+  document.getElementById('scanner-ok-btn').textContent='OK (0)';
+  document.getElementById('scanner-ov').style.display='block';
+  navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'},width:{ideal:1280},height:{ideal:720}}})
+  .then(function(stream){
+    _scanStream=stream;
+    var v=document.getElementById('scanner-v');
+    v.srcObject=stream; v.play();
+    v.onloadedmetadata=function(){setTimeout(scannerLoop,300);};
+  }).catch(function(e){toast('Caméra : '+errMsg(e)); document.getElementById('scanner-ov').style.display='none';});
+}
+
+function scannerClose() {
+  if(_scanTimer){clearTimeout(_scanTimer);_scanTimer=null;}
+  if(_scanStream){_scanStream.getTracks().forEach(function(t){t.stop();});_scanStream=null;}
+  document.getElementById('scanner-ov').style.display='none';
+  _scanPages=[]; _scanStable=0; _scanLastQuad=null;
+}
+
+function scannerLoop() {
+  if(!_scanStream) return;
+  var v=document.getElementById('scanner-v');
+  if(!v.videoWidth){_scanTimer=setTimeout(scannerLoop,100);return;}
+  var quad=scanDetect(v);
+  scanDraw(v,quad);
+  if(quad){
+    if(_scanLastQuad&&scanStable(quad,_scanLastQuad)){
+      _scanStable++;
+      if(_scanStable>=6){scanCapture(v,quad);_scanStable=0;_scanLastQuad=null;_scanTimer=setTimeout(scannerLoop,900);return;}
+    } else {_scanStable=1;}
+    _scanLastQuad=quad;
+  } else {_scanStable=0;_scanLastQuad=null;}
+  _scanTimer=setTimeout(scannerLoop,130);
+}
+
+function scanStable(q1,q2){for(var i=0;i<4;i++){var dx=q1[i].x-q2[i].x,dy=q1[i].y-q2[i].y;if(dx*dx+dy*dy>64)return false;}return true;}
+
+function scanDetect(video){
+  var vw=video.videoWidth,vh=video.videoHeight;
+  var PW=320,PH=Math.round(320*vh/vw);
+  var proc=document.getElementById('scanner-proc');
+  proc.width=PW;proc.height=PH;
+  var ctx=proc.getContext('2d',{willReadFrequently:true});
+  ctx.drawImage(video,0,0,PW,PH);
+  var px=ctx.getImageData(0,0,PW,PH).data;
+  var gray=new Uint8Array(PW*PH);
+  for(var i=0;i<PW*PH;i++) gray[i]=(px[i*4]*77+px[i*4+1]*150+px[i*4+2]*29)>>8;
+  // Box blur x2
+  var g2=new Uint8Array(PW*PH),g3=new Uint8Array(PW*PH);
+  for(var y=1;y<PH-1;y++)for(var x=1;x<PW-1;x++) g2[y*PW+x]=(gray[(y-1)*PW+x-1]+gray[(y-1)*PW+x]+gray[(y-1)*PW+x+1]+gray[y*PW+x-1]+gray[y*PW+x]+gray[y*PW+x+1]+gray[(y+1)*PW+x-1]+gray[(y+1)*PW+x]+gray[(y+1)*PW+x+1])/9;
+  for(var y=1;y<PH-1;y++)for(var x=1;x<PW-1;x++) g3[y*PW+x]=(g2[(y-1)*PW+x-1]+g2[(y-1)*PW+x]+g2[(y-1)*PW+x+1]+g2[y*PW+x-1]+g2[y*PW+x]+g2[y*PW+x+1]+g2[(y+1)*PW+x-1]+g2[(y+1)*PW+x]+g2[(y+1)*PW+x+1])/9;
+  // Sobel
+  var edges=new Uint8Array(PW*PH);
+  for(var y=1;y<PH-1;y++)for(var x=1;x<PW-1;x++){
+    var gx=-g3[(y-1)*PW+x-1]+g3[(y-1)*PW+x+1]-2*g3[y*PW+x-1]+2*g3[y*PW+x+1]-g3[(y+1)*PW+x-1]+g3[(y+1)*PW+x+1];
+    var gy=g3[(y-1)*PW+x-1]+2*g3[(y-1)*PW+x]+g3[(y-1)*PW+x+1]-g3[(y+1)*PW+x-1]-2*g3[(y+1)*PW+x]-g3[(y+1)*PW+x+1];
+    if(gx*gx+gy*gy>1600) edges[y*PW+x]=255;
+  }
+  // Extremal corner points
+  var tl=null,tr=null,br=null,bl=null,tlv=Infinity,trv=-Infinity,brv=-Infinity,blv=Infinity;
+  for(var y=2;y<PH-2;y++)for(var x=2;x<PW-2;x++){
+    if(!edges[y*PW+x]) continue;
+    var s=x+y,d=x-y;
+    if(s<tlv){tlv=s;tl={x:x,y:y};}
+    if(d>trv){trv=d;tr={x:x,y:y};}
+    if(s>brv){brv=s;br={x:x,y:y};}
+    if(d<blv){blv=d;bl={x:x,y:y};}
+  }
+  if(!tl||!tr||!br||!bl) return null;
+  var pts=[tl,tr,br,bl],area=0;
+  for(var i=0;i<4;i++){var j=(i+1)%4;area+=pts[i].x*pts[j].y-pts[j].x*pts[i].y;}
+  area=Math.abs(area)/2;
+  if(area<PW*PH*0.15||area>PW*PH*0.95) return null;
+  return pts;
+}
+
+function scanDraw(video,quad){
+  var disp=document.getElementById('scanner-disp');
+  var dw=disp.clientWidth||window.innerWidth,dh=disp.clientHeight||window.innerHeight;
+  if(disp.width!==dw)disp.width=dw; if(disp.height!==dh)disp.height=dh;
+  var ctx=disp.getContext('2d'); ctx.clearRect(0,0,dw,dh);
+  if(!quad) return;
+  var vw=video.videoWidth,vh=video.videoHeight,PW=320,PH=Math.round(320*vh/vw);
+  var sc=Math.max(dw/vw,dh/vh);
+  var ox=(dw-vw*sc)/2,oy=(dh-vh*sc)/2;
+  function map(p){return{x:p.x*(vw/PW)*sc+ox,y:p.y*(vh/PH)*sc+oy};}
+  var pts=quad.map(map);
+  ctx.beginPath();ctx.moveTo(pts[0].x,pts[0].y);
+  for(var i=1;i<4;i++)ctx.lineTo(pts[i].x,pts[i].y);
+  ctx.closePath();
+  ctx.fillStyle='rgba(45,122,79,0.18)';ctx.fill();
+  ctx.strokeStyle='#4caf82';ctx.lineWidth=3;ctx.stroke();
+  pts.forEach(function(p){ctx.beginPath();ctx.arc(p.x,p.y,8,0,Math.PI*2);ctx.fillStyle='#4caf82';ctx.fill();});
+  if(_scanStable>0){
+    var cx=(pts[0].x+pts[1].x+pts[2].x+pts[3].x)/4,cy=(pts[0].y+pts[1].y+pts[2].y+pts[3].y)/4;
+    ctx.beginPath();ctx.arc(cx,cy,22,-Math.PI/2,-Math.PI/2+_scanStable/6*Math.PI*2);
+    ctx.strokeStyle='white';ctx.lineWidth=4;ctx.stroke();
+  }
+}
+
+function scanCapture(video,quad){
+  var vw=video.videoWidth,vh=video.videoHeight,PW=320,PH=Math.round(320*vh/vw);
+  var sx=vw/PW,sy=vh/PH;
+  var src=quad.map(function(p){return{x:p.x*sx,y:p.y*sy};});
+  function dist(a,b){return Math.sqrt((b.x-a.x)*(b.x-a.x)+(b.y-a.y)*(b.y-a.y));}
+  var w=Math.round(Math.max(dist(src[0],src[1]),dist(src[3],src[2])));
+  var h=Math.round(Math.max(dist(src[0],src[3]),dist(src[1],src[2])));
+  var MAX=1400; if(w>MAX||h>MAX){var sc=MAX/Math.max(w,h);w=Math.round(w*sc);h=Math.round(h*sc);}
+  var cap=document.getElementById('scanner-cap');
+  cap.width=vw;cap.height=vh;cap.getContext('2d').drawImage(video,0,0);
+  var dst=[{x:0,y:0},{x:w,y:0},{x:w,y:h},{x:0,y:h}];
+  var result=scanWarp(cap,src,dst,w,h);
+  result.toBlob(function(blob){
+    var r=new FileReader();
+    r.onload=function(){
+      _scanPages.push(r.result.split(',')[1]);
+      document.getElementById('scanner-ok-btn').textContent='OK ('+_scanPages.length+')';
+      scanRenderStrip();
+      var fl=document.getElementById('scanner-flash');
+      fl.style.animation='none';fl.offsetHeight;fl.style.animation='scanFlash .15s ease-out forwards';
+    };
+    r.readAsDataURL(blob);
+  },'image/jpeg',0.85);
+}
+
+function scanRenderStrip(){
+  document.getElementById('scanner-strip').innerHTML=_scanPages.map(function(b64,i){
+    return '<div style="flex-shrink:0;width:44px;height:62px;border-radius:5px;overflow:hidden;border:2px solid white;box-shadow:0 2px 8px rgba(0,0,0,.5);" onclick="scanRemove('+i+')">'
+      +'<img src="data:image/jpeg;base64,'+b64+'" style="width:100%;height:100%;object-fit:cover;"></div>';
+  }).join('');
+}
+
+function scanRemove(i){_scanPages.splice(i,1);document.getElementById('scanner-ok-btn').textContent='OK ('+_scanPages.length+')';scanRenderStrip();}
+
+function scannerValidate(){
+  if(!_scanPages.length){scannerClose();return;}
+  var b64=_scanPages[0]; scannerClose();
+  _pendingImageB64=b64; _pendingImageMime='image/jpeg';
+  if(!settings.anthropic_key){toast('Clé API manquante — paramètres');return;}
+  setLoading(true,'Lecture du reçu…');
+  fetch('https://api.anthropic.com/v1/messages',{method:'POST',
+    headers:{'Content-Type':'application/json','x-api-key':settings.anthropic_key,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
+    body:JSON.stringify({model:'claude-haiku-4-5-20251001',max_tokens:300,messages:[{role:'user',content:[
+      {type:'image',source:{type:'base64',media_type:'image/jpeg',data:b64}},
+      {type:'text',text:'Extrait de ce ticket de caisse ou recu : date (format YYYY-MM-DD), fournisseur (court, max 20 caracteres), ht (montant HT decimal point), tva (montant TVA decimal point), ttc (montant TTC decimal point). JSON strict sans markdown : {"date":"YYYY-MM-DD","fournisseur":"...","ht":0.00,"tva":0.00,"ttc":0.00}. null si absent.'}
+    ]}]})
+  }).then(function(r){return r.json();}).then(function(json){
+    if(json.error) throw new Error(json.error.message||JSON.stringify(json.error));
+    var parsed={};
+    try{parsed=JSON.parse((json.content&&json.content[0]&&json.content[0].text)||'{}');}catch(ep){}
+    if(parsed.date) document.getElementById('f-date').value=parsed.date;
+    if(parsed.fournisseur) document.getElementById('f-fourn').value=parsed.fournisseur;
+    if(parsed.ttc!=null){document.getElementById('f-ttc').value=parsed.ttc;
+      if(parsed.ht!=null&&parsed.tva!=null){setTvaMode('multi');document.getElementById('f-tva').value=parsed.tva;}}
+    recompute();
+    var bt='✓ Reçu lu'+(parsed.fournisseur?' — '+parsed.fournisseur:'')+(parsed.ttc!=null?' · '+fmtEur(parsed.ttc)+' € TTC':'');
+    var badge=document.getElementById('ocr-badge');badge.textContent=bt;badge.className='ocr-badge show';
+    toast('Reçu lu ✓');
+  }).catch(function(e){toast('Erreur OCR : '+errMsg(e),4000);})
+  .finally(function(){setLoading(false);});
+}
+
+// Perspective warp (homographie)
+function scanWarp(srcCanvas,src,dst,outW,outH){
+  var H=scanHomography(src,dst),Hi=scanInvert3x3(H);
+  var oc=document.createElement('canvas');oc.width=outW;oc.height=outH;
+  var oct=oc.getContext('2d'),oi=oct.createImageData(outW,outH);
+  var sw=srcCanvas.width,sh=srcCanvas.height;
+  var si=srcCanvas.getContext('2d').getImageData(0,0,sw,sh).data;
+  for(var y=0;y<outH;y++)for(var x=0;x<outW;x++){
+    var w_=Hi[6]*x+Hi[7]*y+Hi[8];
+    var px=Math.round((Hi[0]*x+Hi[1]*y+Hi[2])/w_),py=Math.round((Hi[3]*x+Hi[4]*y+Hi[5])/w_);
+    if(px>=0&&px<sw&&py>=0&&py<sh){
+      var s4=(py*sw+px)*4,d4=(y*outW+x)*4;
+      oi.data[d4]=si[s4];oi.data[d4+1]=si[s4+1];oi.data[d4+2]=si[s4+2];oi.data[d4+3]=255;
+    }
+  }
+  oct.putImageData(oi,0,0);return oc;
+}
+function scanHomography(src,dst){
+  var A=[];
+  for(var i=0;i<4;i++){var sx=src[i].x,sy=src[i].y,dx=dst[i].x,dy=dst[i].y;
+    A.push([-sx,-sy,-1,0,0,0,sx*dx,sy*dx,dx]);A.push([0,0,0,-sx,-sy,-1,sx*dy,sy*dy,dy]);}
+  var M=A.map(function(r){return r.slice(0,8);}),b=A.map(function(r){return -r[8];});
+  var h=scanGauss(M,b);return [h[0],h[1],h[2],h[3],h[4],h[5],h[6],h[7],1];
+}
+function scanGauss(A,b){
+  var n=A.length,M=A.map(function(r,i){return r.concat([b[i]]);});
+  for(var col=0;col<n;col++){
+    var mx=col;for(var row=col+1;row<n;row++)if(Math.abs(M[row][col])>Math.abs(M[mx][col]))mx=row;
+    var t=M[col];M[col]=M[mx];M[mx]=t;
+    for(var row=col+1;row<n;row++){var f=M[row][col]/M[col][col];for(var j=col;j<=n;j++)M[row][j]-=f*M[col][j];}
+  }
+  var x=new Array(n).fill(0);
+  for(var i=n-1;i>=0;i--){x[i]=M[i][n];for(var j=i+1;j<n;j++)x[i]-=M[i][j]*x[j];x[i]/=M[i][i];}
+  return x;
+}
+function scanInvert3x3(H){
+  var a=H[0],b=H[1],c=H[2],d=H[3],e=H[4],f=H[5],g=H[6],h=H[7],k=H[8];
+  var det=a*(e*k-f*h)-b*(d*k-f*g)+c*(d*h-e*g);
+  return[(e*k-f*h)/det,(c*h-b*k)/det,(b*f-c*e)/det,
+         (f*g-d*k)/det,(a*k-c*g)/det,(c*d-a*f)/det,
+         (d*h-e*g)/det,(b*g-a*h)/det,(a*e-b*d)/det];
+}
 
 // ===== SERVICE WORKER =====
 if('serviceWorker' in navigator){ navigator.serviceWorker.register('./sw.js').catch(function(){}); }
