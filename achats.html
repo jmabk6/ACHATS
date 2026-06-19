@@ -620,7 +620,11 @@ body { background:var(--bg); font-family:'Inter',sans-serif; max-width:430px; ma
     <span id="scanner-hint" style="color:white;font-size:13px;font-weight:600;text-shadow:0 1px 4px rgba(0,0,0,.6);">Visez la facture</span>
     <button id="scanner-ok-btn" onclick="scannerValidate()" style="background:var(--accent);border:none;color:white;padding:8px 18px;border-radius:20px;font-size:14px;font-weight:700;cursor:pointer;">OK (0)</button>
   </div>
-  <div id="scanner-strip" style="position:absolute;bottom:24px;left:0;right:0;display:flex;gap:8px;padding:0 16px;overflow-x:auto;"></div>
+  <!-- Bouton capture manuelle centré en bas -->
+  <div style="position:absolute;bottom:24px;left:0;right:0;display:flex;flex-direction:column;align-items:center;gap:10px;">
+    <div id="scanner-strip" style="display:flex;gap:8px;padding:0 16px;overflow-x:auto;max-width:100%;"></div>
+    <button onclick="scanManualCapture()" style="width:64px;height:64px;border-radius:50%;border:4px solid white;background:rgba(255,255,255,.25);cursor:pointer;font-size:26px;line-height:1;color:white;" title="Capturer maintenant">&#x1F4F7;</button>
+  </div>
 </div>
 
 <script>
@@ -1368,53 +1372,76 @@ function scannerLoop() {
   var quad=scanDetect(v);
   scanDraw(v,quad);
   if(quad){
+    // Lissage exponentiel pour un overlay fluide
+    if(_scanLastQuad){
+      quad=quad.map(function(p,i){
+        return{x:Math.round(p.x*0.35+_scanLastQuad[i].x*0.65),
+               y:Math.round(p.y*0.35+_scanLastQuad[i].y*0.65)};
+      });
+    }
     if(_scanLastQuad&&scanStable(quad,_scanLastQuad)){
       _scanStable++;
-      if(_scanStable>=6){scanCapture(v,quad);_scanStable=0;_scanLastQuad=null;_scanTimer=setTimeout(scannerLoop,900);return;}
-    } else {_scanStable=1;}
+      if(_scanStable>=5){scanCapture(v,quad);_scanStable=0;_scanLastQuad=null;_scanTimer=setTimeout(scannerLoop,900);return;}
+    } else {_scanStable=Math.max(0,_scanStable-1);}
     _scanLastQuad=quad;
   } else {_scanStable=0;_scanLastQuad=null;}
-  _scanTimer=setTimeout(scannerLoop,130);
+  _scanTimer=setTimeout(scannerLoop,120);
 }
 
 function scanStable(q1,q2){for(var i=0;i<4;i++){var dx=q1[i].x-q2[i].x,dy=q1[i].y-q2[i].y;if(dx*dx+dy*dy>64)return false;}return true;}
 
 function scanDetect(video){
   var vw=video.videoWidth,vh=video.videoHeight;
+  if(!vw||!vh) return null;
   var PW=320,PH=Math.round(320*vh/vw);
   var proc=document.getElementById('scanner-proc');
   proc.width=PW;proc.height=PH;
   var ctx=proc.getContext('2d',{willReadFrequently:true});
   ctx.drawImage(video,0,0,PW,PH);
   var px=ctx.getImageData(0,0,PW,PH).data;
+
+  // Niveaux de gris
   var gray=new Uint8Array(PW*PH);
   for(var i=0;i<PW*PH;i++) gray[i]=(px[i*4]*77+px[i*4+1]*150+px[i*4+2]*29)>>8;
-  // Box blur x2
-  var g2=new Uint8Array(PW*PH),g3=new Uint8Array(PW*PH);
-  for(var y=1;y<PH-1;y++)for(var x=1;x<PW-1;x++) g2[y*PW+x]=(gray[(y-1)*PW+x-1]+gray[(y-1)*PW+x]+gray[(y-1)*PW+x+1]+gray[y*PW+x-1]+gray[y*PW+x]+gray[y*PW+x+1]+gray[(y+1)*PW+x-1]+gray[(y+1)*PW+x]+gray[(y+1)*PW+x+1])/9;
-  for(var y=1;y<PH-1;y++)for(var x=1;x<PW-1;x++) g3[y*PW+x]=(g2[(y-1)*PW+x-1]+g2[(y-1)*PW+x]+g2[(y-1)*PW+x+1]+g2[y*PW+x-1]+g2[y*PW+x]+g2[y*PW+x+1]+g2[(y+1)*PW+x-1]+g2[(y+1)*PW+x]+g2[(y+1)*PW+x+1])/9;
-  // Sobel
-  var edges=new Uint8Array(PW*PH);
-  for(var y=1;y<PH-1;y++)for(var x=1;x<PW-1;x++){
-    var gx=-g3[(y-1)*PW+x-1]+g3[(y-1)*PW+x+1]-2*g3[y*PW+x-1]+2*g3[y*PW+x+1]-g3[(y+1)*PW+x-1]+g3[(y+1)*PW+x+1];
-    var gy=g3[(y-1)*PW+x-1]+2*g3[(y-1)*PW+x]+g3[(y-1)*PW+x+1]-g3[(y+1)*PW+x-1]-2*g3[(y+1)*PW+x]-g3[(y+1)*PW+x+1];
-    if(gx*gx+gy*gy>1600) edges[y*PW+x]=255;
+
+  // Seuillage Otsu : la facture (blanche) se détache du fond (table, main…)
+  var hist=new Int32Array(256),tot=PW*PH,sm=0;
+  for(var i=0;i<tot;i++){hist[gray[i]]++;}
+  for(var i=0;i<256;i++) sm+=i*hist[i];
+  var sb=0,wb=0,best=0,thresh=128;
+  for(var t=0;t<256;t++){
+    wb+=hist[t]; if(!wb) continue;
+    var wf=tot-wb; if(!wf) break;
+    sb+=t*hist[t];
+    var mb=sb/wb,mf=(sm-sb)/wf,v=wb*wf*(mb-mf)*(mb-mf);
+    if(v>best){best=v;thresh=t;}
   }
-  // Extremal corner points
-  var tl=null,tr=null,br=null,bl=null,tlv=Infinity,trv=-Infinity,brv=-Infinity,blv=Infinity;
-  for(var y=2;y<PH-2;y++)for(var x=2;x<PW-2;x++){
-    if(!edges[y*PW+x]) continue;
+  thresh=Math.max(thresh-15,60); // un peu plus bas pour inclure les ombres légères
+
+  // Ignorer la bordure (8%) souvent occupée par la main ou la table
+  var mx=Math.round(PW*0.08),my=Math.round(PH*0.08);
+  var tl=null,tr=null,br=null,bl=null;
+  var tlv=Infinity,trv=-Infinity,brv=-Infinity,blv=Infinity;
+  var cnt=0;
+  for(var y=my;y<PH-my;y++)for(var x=mx;x<PW-mx;x++){
+    if(gray[y*PW+x]<thresh) continue;
+    cnt++;
     var s=x+y,d=x-y;
     if(s<tlv){tlv=s;tl={x:x,y:y};}
     if(d>trv){trv=d;tr={x:x,y:y};}
     if(s>brv){brv=s;br={x:x,y:y};}
     if(d<blv){blv=d;bl={x:x,y:y};}
   }
-  if(!tl||!tr||!br||!bl) return null;
+  // Pas assez de pixels clairs = pas de document
+  if(!tl||cnt<(PW-2*mx)*(PH-2*my)*0.08) return null;
+
+  // Vérification surface (entre 12% et 97% de la zone intérieure)
   var pts=[tl,tr,br,bl],area=0;
   for(var i=0;i<4;i++){var j=(i+1)%4;area+=pts[i].x*pts[j].y-pts[j].x*pts[i].y;}
   area=Math.abs(area)/2;
-  if(area<PW*PH*0.15||area>PW*PH*0.95) return null;
+  var inner=(PW-2*mx)*(PH-2*my);
+  if(area<inner*0.12||area>inner*0.97) return null;
+
   return pts;
 }
 
@@ -1475,6 +1502,39 @@ function scanRenderStrip(){
 }
 
 function scanRemove(i){_scanPages.splice(i,1);document.getElementById('scanner-ok-btn').textContent='OK ('+_scanPages.length+')';scanRenderStrip();}
+
+function scanManualCapture(){
+  var v=document.getElementById('scanner-v');
+  if(!v.videoWidth) return;
+  // Capture plein cadre sans correction perspective
+  var cap=document.getElementById('scanner-cap');
+  cap.width=v.videoWidth; cap.height=v.videoHeight;
+  cap.getContext('2d').drawImage(v,0,0);
+  // Si un quad est détecté, on l'utilise ; sinon plein cadre
+  if(_scanLastQuad){
+    var vw=v.videoWidth,vh=v.videoHeight,PW=320,PH=Math.round(320*vh/vw);
+    var sx=vw/PW,sy=vh/PH;
+    var src=_scanLastQuad.map(function(p){return{x:p.x*sx,y:p.y*sy};});
+    function dist(a,b){return Math.sqrt((b.x-a.x)*(b.x-a.x)+(b.y-a.y)*(b.y-a.y));}
+    var w=Math.round(Math.max(dist(src[0],src[1]),dist(src[3],src[2])));
+    var h=Math.round(Math.max(dist(src[0],src[3]),dist(src[1],src[2])));
+    var MAX=1400; if(w>MAX||h>MAX){var sc=MAX/Math.max(w,h);w=Math.round(w*sc);h=Math.round(h*sc);}
+    var dst=[{x:0,y:0},{x:w,y:0},{x:w,y:h},{x:0,y:h}];
+    cap=scanWarp(cap,src,dst,w,h);
+  }
+  cap.toBlob(function(blob){
+    var r=new FileReader();
+    r.onload=function(){
+      _scanPages.push(r.result.split(',')[1]);
+      document.getElementById('scanner-ok-btn').textContent='OK ('+_scanPages.length+')';
+      scanRenderStrip();
+      var fl=document.getElementById('scanner-flash');
+      fl.style.animation='none'; fl.offsetHeight;
+      fl.style.animation='scanFlash .15s ease-out forwards';
+    };
+    r.readAsDataURL(blob);
+  },'image/jpeg',0.85);
+}
 
 function scannerValidate(){
   if(!_scanPages.length){scannerClose();return;}
