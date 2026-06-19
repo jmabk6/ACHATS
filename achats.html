@@ -296,6 +296,10 @@ body { background:var(--bg); font-family:'Inter',sans-serif; max-width:430px; ma
       </button>
     </div>
 
+    <div id="scan-preview" style="display:none;margin-bottom:8px;border-radius:10px;overflow:hidden;border:1.5px solid var(--border);max-height:220px;text-align:center;background:#000;">
+      <img id="scan-preview-img" style="max-width:100%;max-height:220px;object-fit:contain;display:block;margin:0 auto;">
+    </div>
+
     <div class="ocr-badge" id="ocr-badge"></div>
 
     <!-- Date -->
@@ -856,6 +860,8 @@ function initForm() {
   document.querySelectorAll('#pills-taux .pill').forEach(function(p){ p.classList.toggle('active',parseFloat(p.dataset.val)===0.20); });
   updateDestRow(); updateCompteRow(); updateCatRow();
   document.getElementById('ocr-badge').className='ocr-badge';
+  document.getElementById('scan-preview').style.display='none';
+  document.getElementById('scan-preview-img').src='';
   _pendingImageB64=null; _pendingImageMime='image/jpeg';
   recompute();
 }
@@ -1185,6 +1191,7 @@ async function handleImage(input) {
   try {
     var b64=await compressImage(file);
     _pendingImageB64=b64; _pendingImageMime='image/jpeg';
+    showScanPreview(b64);
     setLoading(true,'Lecture du reçu…');
     var res=await fetch('https://api.anthropic.com/v1/messages',{
       method:'POST',
@@ -1536,10 +1543,18 @@ function scanManualCapture(){
   },'image/jpeg',0.85);
 }
 
+function showScanPreview(b64){
+  var el=document.getElementById('scan-preview');
+  var img=document.getElementById('scan-preview-img');
+  img.src='data:image/jpeg;base64,'+b64;
+  el.style.display='block';
+}
+
 function scannerValidate(){
   if(!_scanPages.length){scannerClose();return;}
   var b64=_scanPages[0]; scannerClose();
   _pendingImageB64=b64; _pendingImageMime='image/jpeg';
+  showScanPreview(b64);
   if(!settings.anthropic_key){toast('Clé API manquante — paramètres');return;}
   setLoading(true,'Lecture du reçu…');
   fetch('https://api.anthropic.com/v1/messages',{method:'POST',
